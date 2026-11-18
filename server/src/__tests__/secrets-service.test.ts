@@ -1305,7 +1305,7 @@ describeEmbeddedPostgres("secretService", () => {
     }
 
     expect(redactedValues).toEqual(["runtime-secret", "runtime-secret"]);
-    const events = await svc.listAccessEvents(companyId, secret.id);
+    const { items: events } = await svc.listAccessEvents(companyId, secret.id);
     expect(events).toHaveLength(2);
     expect(events).toEqual(expect.arrayContaining([
       expect.objectContaining({
@@ -1400,7 +1400,7 @@ describeEmbeddedPostgres("secretService", () => {
     })).rejects.toThrow(/verified heartbeat run/i);
 
     expect(registerForRedaction).not.toHaveBeenCalled();
-    const events = await svc.listAccessEvents(companyId, secret.id);
+    const { items: events } = await svc.listAccessEvents(companyId, secret.id);
     expect(events).toEqual([
       expect.objectContaining({
         consumerType: "agent_api",
@@ -1445,7 +1445,159 @@ describeEmbeddedPostgres("secretService", () => {
       registerForRedaction: vi.fn(),
     })).rejects.toThrow(/low[_-]trust.*secrets:read/i);
 
-    expect(await svc.listAccessEvents(companyId, secret.id)).toEqual([]);
+    expect((await svc.listAccessEvents(companyId, secret.id)).items).toEqual([]);
+  });
+
+  describe("listAccessEvents pagination", () => {
+    /**
+     * Seeds `count` access events for a fresh secret. `createdAt` is explicit
+     * so ordering is deterministic; index 0 ends up oldest.
+     */
+    async function seedAccessEvents(count: number, options: { sameTimestamp?: boolean } = {}) {
+      const companyId = await seedCompany();
+      const svc = secretService(db);
+      const secret = await svc.create(companyId, {
+        name: `paged-${randomUUID()}`,
+        provider: "local_encrypted",
+        value: "value",
+      });
+      const base = Date.UTC(2026, 0, 1);
+      await db.insert(secretAccessEvents).values(
+        Array.from({ length: count }, (_, index) => ({
+          companyId,
+          secretId: secret.id,
+          provider: "local_encrypted",
+          actorType: "agent",
+          actorId: "agent-1",
+          consumerType: "agent",
+          consumerId: "agent-1",
+          outcome: "success",
+          // A shared timestamp forces every row onto the cursor's id tiebreak.
+          createdAt: new Date(options.sameTimestamp ? base : base + index * 1000),
+        })),
+      );
+      return { companyId, secretId: secret.id, svc };
+    }
+
+    it("bounds an unparameterized read to the default page size", async () => {
+      const { companyId, secretId, svc } = await seedAccessEvents(120);
+
+      const page = await svc.listAccessEvents(companyId, secretId);
+
+      expect(page.items).toHaveLength(50);
+      expect(page.nextCursor).toEqual(expect.any(String));
+    });
+
+    it("returns at most the requested page size", async () => {
+      const { companyId, secretId, svc } = await seedAccessEvents(120);
+
+      expect((await svc.listAccessEvents(companyId, secretId, { limit: 10 })).items)
+        .toHaveLength(10);
+      expect((await svc.listAccessEvents(companyId, secretId, { limit: 200 })).items)
+        .toHaveLength(120);
+    });
+
+    it("orders newest first", async () => {
+      const { companyId, secretId, svc } = await seedAccessEvents(30);
+
+      const { items } = await svc.listAccessEvents(companyId, secretId, { limit: 30 });
+
+      expect(items[0]!.createdAt.getTime())
+        .toBeGreaterThanOrEqual(items.at(-1)!.createdAt.getTime());
+      const timestamps = items.map((event) => event.createdAt.getTime());
+      expect([...timestamps].sort((a, b) => b - a)).toEqual(timestamps);
+    });
+
+    it("walks every row exactly once across pages, with no overlap and no gap", async () => {
+      const { companyId, secretId, svc } = await seedAccessEvents(120);
+
+      const seen: string[] = [];
+      let cursor: string | undefined;
+      let pages = 0;
+      do {
+        const page = await svc.listAccessEvents(companyId, secretId, { limit: 25, cursor });
+        seen.push(...page.items.map((event) => event.id));
+        cursor = page.nextCursor ?? undefined;
+        pages += 1;
+      } while (cursor && pages < 20);
+
+      expect(pages).toBe(5);
+      expect(seen).toHaveLength(120);
+      // No row repeated and none missed.
+      expect(new Set(seen).size).toBe(120);
+      const { items: everything } = await svc.listAccessEvents(companyId, secretId, { limit: 200 });
+      expect(seen).toEqual(everything.map((event) => event.id));
+    });
+
+    it("does not skip or repeat rows that share a createdAt", async () => {
+      // The whole page boundary falls inside one timestamp, so only the id
+      // tiebreak in the keyset predicate can keep the walk correct.
+      const { companyId, secretId, svc } = await seedAccessEvents(40, { sameTimestamp: true });
+
+      const first = await svc.listAccessEvents(companyId, secretId, { limit: 20 });
+      const second = await svc.listAccessEvents(companyId, secretId, {
+        limit: 20,
+        cursor: first.nextCursor!,
+      });
+
+      const ids = [...first.items, ...second.items].map((event) => event.id);
+      expect(ids).toHaveLength(40);
+      expect(new Set(ids).size).toBe(40);
+      expect(second.nextCursor).toBeNull();
+    });
+
+    it("reports a null nextCursor when the page exactly empties the table", async () => {
+      const { companyId, secretId, svc } = await seedAccessEvents(10);
+
+      const page = await svc.listAccessEvents(companyId, secretId, { limit: 10 });
+
+      expect(page.items).toHaveLength(10);
+      expect(page.nextCursor).toBeNull();
+    });
+
+    it("rejects a cursor it did not issue with 400", async () => {
+      const { companyId, secretId, svc } = await seedAccessEvents(5);
+
+      for (const cursor of [
+        "not-base64url-json",
+        Buffer.from(JSON.stringify({ createdAt: "nope", id: "nope" })).toString("base64url"),
+        Buffer.from(JSON.stringify({ id: randomUUID() })).toString("base64url"),
+      ]) {
+        const error = await svc
+          .listAccessEvents(companyId, secretId, { cursor })
+          .catch((err: HttpError) => err);
+        expect((error as HttpError).status).toBe(400);
+        expect((error as HttpError).message).toBe("Invalid secret access cursor");
+      }
+    });
+
+    it("keeps a page scoped to its own company and secret", async () => {
+      const { companyId, secretId, svc } = await seedAccessEvents(5);
+      const other = await seedAccessEvents(5);
+
+      const page = await svc.listAccessEvents(companyId, secretId, { limit: 200 });
+
+      expect(page.items).toHaveLength(5);
+      expect(page.items.every((event) => event.secretId === secretId)).toBe(true);
+      expect(page.items.every((event) => event.companyId === companyId)).toBe(true);
+      expect((await svc.listAccessEvents(companyId, other.secretId, { limit: 200 })).items)
+        .toEqual([]);
+    });
+
+    it("returns the same per-row fields pagination replaced the bare array with", async () => {
+      const { companyId, secretId, svc } = await seedAccessEvents(1);
+
+      const [event] = (await svc.listAccessEvents(companyId, secretId)).items;
+
+      // The pagination key is internal and must not leak into a row.
+      expect(event).not.toHaveProperty("cursorCreatedAt");
+      expect(Object.keys(event!).sort()).toEqual([
+        "actorId", "actorType", "companyId", "configPath", "consumerId", "consumerType",
+        "createdAt", "credentialOwnerUserId", "credentialSubjectId", "credentialSubjectType",
+        "errorCode", "heartbeatRunId", "id", "issueId", "outcome", "pluginId", "provider",
+        "responsibleUserId", "secretId", "secretScope", "userSecretDefinitionId", "version",
+      ]);
+    });
   });
 
   it("syncs top-level secret refs idempotently", async () => {
@@ -1559,7 +1711,7 @@ describeEmbeddedPostgres("secretService", () => {
     });
 
     expect(resolved.env.API_KEY).toBe("runtime-secret");
-    const events = await svc.listAccessEvents(companyId, secret.id);
+    const { items: events } = await svc.listAccessEvents(companyId, secret.id);
     expect(events).toHaveLength(2);
     expect(events.map((event) => event.outcome).sort()).toEqual(["failure", "success"]);
     expect(JSON.stringify(events)).not.toContain("runtime-secret");
@@ -1594,7 +1746,7 @@ describeEmbeddedPostgres("secretService", () => {
       secretName,
     });
     // Value-free validation: no access events recorded.
-    expect(await svc.listAccessEvents(companyId, secret.id)).toHaveLength(0);
+    expect((await svc.listAccessEvents(companyId, secret.id)).items).toHaveLength(0);
 
     await svc.syncEnvBindingsForTarget(companyId, { targetType: "agent", targetId: "agent-1" }, env);
 
@@ -1766,7 +1918,7 @@ describeEmbeddedPostgres("secretService", () => {
       }),
     ]);
 
-    const events = await svc.listAccessEvents(companyId, secret.id);
+    const { items: events } = await svc.listAccessEvents(companyId, secret.id);
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({
       companyId,
@@ -2540,7 +2692,7 @@ describeEmbeddedPostgres("secretService", () => {
     await db.update(companySecrets).set({ status: "deleted" }).where(eq(companySecrets.id, secret.id));
     await expect(svc.resolveEnvBindings(companyId, env, context)).rejects.toThrow(/not found/i);
 
-    const events = await svc.listAccessEvents(companyId, secret.id);
+    const { items: events } = await svc.listAccessEvents(companyId, secret.id);
     expect(events.map((event) => event.errorCode).sort()).toEqual([
       "binding_missing",
       "provider_error",
@@ -4286,7 +4438,7 @@ describeEmbeddedPostgres("secretService", () => {
     });
 
     expect(resolved).toBe("runtime-secret");
-    const events = await svc.listAccessEvents(companyId, secret.id);
+    const { items: events } = await svc.listAccessEvents(companyId, secret.id);
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({
       companyId,

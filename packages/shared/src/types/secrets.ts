@@ -303,6 +303,22 @@ export interface SecretAccessEvent {
   createdAt: Date;
 }
 
+/**
+ * One keyset-paginated page of access events, newest first. `nextCursor` is an
+ * opaque token to pass back as `cursor`; `null` means this was the last page.
+ */
+export interface SecretAccessEventPage {
+  items: SecretAccessEvent[];
+  nextCursor: string | null;
+}
+
+// Page bounds for the secret access-event feed. These match the agent-action
+// audit feed (`GET /api/companies/:companyId/audit/agent-actions`) so both audit
+// list endpoints bound a page the same way. The route's zod schema and the
+// service default both read these, so the two cannot drift apart.
+export const SECRET_ACCESS_EVENT_DEFAULT_LIMIT = 50;
+export const SECRET_ACCESS_EVENT_MAX_LIMIT = 200;
+
 export type RemoteSecretImportCandidateStatus = "ready" | "duplicate" | "conflict";
 
 export interface RemoteSecretImportConflict {

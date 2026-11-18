@@ -654,11 +654,14 @@ function installStorybookApiFixtures() {
     );
     if (secretEventsMatch) {
       const [, secretId] = secretEventsMatch;
-      return Response.json(
-        storybookSecretAccessEvents.filter(
+      // The endpoint is keyset paginated. The fixture set is small enough to
+      // be one page, so this page is always the last one.
+      return Response.json({
+        items: storybookSecretAccessEvents.filter(
           (event) => event.secretId === secretId,
         ),
-      );
+        nextCursor: null,
+      });
     }
 
     const companyResourceMatch = url.pathname.match(

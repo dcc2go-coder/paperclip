@@ -937,6 +937,7 @@ export type {
   CompanySecretUsageBinding,
   CompanySecretVersion,
   SecretAccessEvent,
+  SecretAccessEventPage,
   RemoteSecretImportCandidate,
   RemoteSecretImportCandidateStatus,
   RemoteSecretImportConflict,
@@ -959,6 +960,7 @@ export type {
   ApproveSecretProposalInput,
   RejectSecretProposalInput,
 } from "./secrets.js";
+export { SECRET_ACCESS_EVENT_DEFAULT_LIMIT, SECRET_ACCESS_EVENT_MAX_LIMIT } from "./secrets.js";
 export type {
   Routine,
   RoutineEnvConfig,

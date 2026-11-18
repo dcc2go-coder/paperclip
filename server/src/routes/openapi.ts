@@ -1,4 +1,4 @@
-import { catalogTeamInstallSchema, catalogTeamPreviewSchema, updateWorkspacePreferenceSchema } from "@paperclipai/shared";
+import { catalogTeamInstallSchema, catalogTeamPreviewSchema, updateWorkspacePreferenceSchema, SECRET_ACCESS_EVENT_MAX_LIMIT } from "@paperclipai/shared";
 import { MUSE_ASSET_VERSION, museStopBoundarySchema, museDetectorCleanupAttestationSchema, createGrokInvitationSchema, configureGrokRoutineSchema, verifyGrokRoutineSchema, recoverGrokRoutineSchema, pairGrokBindingSchema, stopGrokWorkSchema, retryGrokDeliverySchema, updateFastResponseSchema } from "@paperclipai/shared";
 import { slackTestMessageSchema, slackTestMessageResultSchema, slackManagerAuthorizationSchema, slackSetupOptionsSchema, slackManagedProvisionSchema, slackManagedResultSchema, slackRegistrationSchema, slackSetupActionSchema, slackInstallAuthorizationSchema, slackRegistrationStateSchema, slackAppConfigurationSchema, slackAvatarStateSchema, slackAccountStateSchema } from "@paperclipai/shared";
 import { experimentalApiMetadata } from "./experimental-api-metadata.js";
@@ -1001,6 +1001,43 @@ const chatIdentityLinkPreviewResponseSchema = z
     externalLabel: z.string(),
     externalDetail: z.string(),
     expiresAt: z.string().datetime(),
+  })
+  .strict();
+
+// One row of a secret's access history. The field set is unchanged from the
+// pre-pagination response; only the envelope around it is new.
+const secretAccessEventSchema = z
+  .object({
+    id: z.string().uuid(),
+    companyId: z.string().uuid(),
+    secretId: z.string().uuid().nullable(),
+    userSecretDefinitionId: z.string().uuid().nullable(),
+    secretScope: z.string(),
+    version: z.number().int().nullable(),
+    provider: z.string(),
+    responsibleUserId: z.string().nullable(),
+    credentialOwnerUserId: z.string().nullable(),
+    credentialSubjectType: z.string().nullable(),
+    credentialSubjectId: z.string().nullable(),
+    actorType: z.enum(["agent", "user", "system", "plugin"]),
+    actorId: z.string().nullable(),
+    consumerType: z.string(),
+    consumerId: z.string(),
+    configPath: z.string().nullable(),
+    issueId: z.string().uuid().nullable(),
+    heartbeatRunId: z.string().uuid().nullable(),
+    pluginId: z.string().uuid().nullable(),
+    outcome: z.string(),
+    errorCode: z.string().nullable(),
+    createdAt: z.string().datetime(),
+  })
+  .strict();
+
+const secretAccessEventPageSchema = z
+  .object({
+    items: z.array(secretAccessEventSchema),
+    /** Opaque keyset cursor; null on the last page. */
+    nextCursor: z.string().nullable(),
   })
   .strict();
 
@@ -11272,7 +11309,6 @@ for (const route of [
     "Check a secret provider configuration",
   ],
   ["get", "/api/secrets/{id}/usage", "Get secret usage"],
-  ["get", "/api/secrets/{id}/access-events", "List secret access events"],
 ] as const) {
   registerCurrentRoute({
     method: route[0],
@@ -11281,6 +11317,26 @@ for (const route of [
     summary: route[2],
   });
 }
+
+// Keyset-paginated, newest first, on the same contract as the agent-action
+// audit feed: a bounded `limit`, an opaque `cursor`, and an `{ items,
+// nextCursor }` envelope with `nextCursor: null` on the last page.
+registerCurrentRoute({
+  method: "get",
+  path: "/api/secrets/{id}/access-events",
+  tags: ["secrets"],
+  summary: "List secret access events",
+  query: z.object({
+    cursor: z.string().min(1).optional(),
+    limit: z.coerce.number().int().min(1).max(SECRET_ACCESS_EVENT_MAX_LIMIT).optional(),
+  }),
+  responses: {
+    200: r.ok(secretAccessEventPageSchema),
+    400: r.badRequest,
+    401: r.unauthorized,
+    404: r.notFound,
+  },
+});
 
 registerCurrentRoute({
   method: "post",
