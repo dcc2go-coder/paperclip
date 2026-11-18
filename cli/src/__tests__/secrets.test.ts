@@ -368,6 +368,21 @@ describe("secrets API parity commands", () => {
       ["DELETE", "http://localhost:3100/api/secrets/secret-1"],
     ]);
   });
+
+  it("passes access-event paging options through to the query string", async () => {
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse()));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await runSecretCommand(["secrets", "access-events", "secret-1", "--limit", "10"]);
+    await runSecretCommand([
+      "secrets", "access-events", "secret-1", "--limit", "10", "--cursor", "opaque-cursor",
+    ]);
+
+    expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
+      "http://localhost:3100/api/secrets/secret-1/access-events?limit=10",
+      "http://localhost:3100/api/secrets/secret-1/access-events?limit=10&cursor=opaque-cursor",
+    ]);
+  });
 });
 
 async function runSecretCommand(args: string[]): Promise<void> {

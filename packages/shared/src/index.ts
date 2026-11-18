@@ -1455,6 +1455,7 @@ export type {
   CompanySecretUsageBinding,
   CompanySecretVersion,
   SecretAccessEvent,
+  SecretAccessEventPage,
   RemoteSecretImportCandidate,
   RemoteSecretImportCandidateStatus,
   RemoteSecretImportConflict,
@@ -1726,6 +1727,10 @@ export {
   COMPANY_SEARCH_SCOPES,
   COMPANY_SEARCH_SORTS,
   COMPANY_SEARCH_UPDATED_WITHIN_OPTIONS,
+} from "./types/index.js";
+export {
+  SECRET_ACCESS_EVENT_DEFAULT_LIMIT,
+  SECRET_ACCESS_EVENT_MAX_LIMIT,
 } from "./types/index.js";
 export {
   ADAPTER_AUTH_SESSION_STATUSES,

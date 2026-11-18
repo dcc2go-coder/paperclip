@@ -5,6 +5,7 @@ import type {
   CompanySecret,
   CompanySecretUsageBinding,
   SecretAccessEvent,
+  SecretAccessEventPage,
 } from "../../../packages/shared/src/types/secrets.js";
 import { collectRunEvents } from "../run-observations.js";
 import { identityWorker, openStandingChat } from "./identity-support.js";
@@ -462,14 +463,16 @@ export const secretDeliveryExternalCases = [
         state.unauthorizedChecks = fixture.endpoint.calls.filter(
           (row) => !row.authorized,
         ).length;
-        state.boundAccess = await ctx.input.api.get<SecretAccessEvent[]>(
-          `/api/secrets/${state.secretId}/access-events`,
-        );
+        state.boundAccess = (
+          await ctx.input.api.get<SecretAccessEventPage>(
+            `/api/secrets/${state.secretId}/access-events`,
+          )
+        ).items;
         state.unrelatedSuccessCount = (
-          await ctx.input.api.get<SecretAccessEvent[]>(
+          await ctx.input.api.get<SecretAccessEventPage>(
             `/api/secrets/${state.unrelatedId}/access-events`,
           )
-        ).filter((row) => row.outcome === "success").length;
+        ).items.filter((row) => row.outcome === "success").length;
         const ids = secretScanRoots(ctx.issue()!.id, o.tasks);
         const events = [];
         for (const run of o.runs)

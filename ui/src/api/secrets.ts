@@ -5,7 +5,7 @@ import type {
   SecretProviderConfigDiscoveryPreviewResult,
   RemoteSecretImportPreviewResult,
   RemoteSecretImportResult,
-  SecretAccessEvent,
+  SecretAccessEventPage,
   SecretManagedMode,
   SecretProvider,
   SecretProviderConfigStatus,
@@ -189,7 +189,17 @@ export const secretsApi = {
     api.patch<CompanySecret>(`/secrets/${id}`, { status: "archived" satisfies SecretStatus }),
   remove: (id: string) => api.delete<{ ok: true }>(`/secrets/${id}`),
   usage: (id: string) => api.get<SecretUsageResponse>(`/secrets/${id}/usage`),
-  accessEvents: (id: string) => api.get<SecretAccessEvent[]>(`/secrets/${id}/access-events`),
+  /**
+   * One newest-first page of a secret's access history. Pass `nextCursor` back
+   * as `cursor` to read the next page; the server bounds `limit` itself.
+   */
+  accessEvents: (id: string, params: { limit?: number; cursor?: string } = {}) => {
+    const search = new URLSearchParams();
+    if (params.limit != null) search.set("limit", String(params.limit));
+    if (params.cursor) search.set("cursor", params.cursor);
+    const qs = search.toString();
+    return api.get<SecretAccessEventPage>(`/secrets/${id}/access-events${qs ? `?${qs}` : ""}`);
+  },
 
   // --- User-specific secrets ---------------------------------------------
   // Admin: shared definitions each member fills in with their own value.

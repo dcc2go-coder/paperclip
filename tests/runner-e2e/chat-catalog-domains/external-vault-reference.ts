@@ -8,6 +8,7 @@ import type {
   RemoteSecretImportPreviewResult,
   RemoteSecretImportResult,
   SecretAccessEvent,
+  SecretAccessEventPage,
   SecretProviderDescriptor,
 } from "../../../packages/shared/src/types/secrets.js";
 import {
@@ -811,10 +812,12 @@ export const vaultReferenceExternalCases = [
         ).length;
         state.awsAuthorityAbsent =
           calls.length === 1 && calls[0]!.awsAuthorityAbsent === true;
-        const access = imported[0]
-          ? await ctx.input.api.get<SecretAccessEvent[]>(
-              `/api/secrets/${imported[0].id}/access-events`,
-            )
+        const access: SecretAccessEvent[] = imported[0]
+          ? (
+              await ctx.input.api.get<SecretAccessEventPage>(
+                `/api/secrets/${imported[0].id}/access-events`,
+              )
+            ).items
           : [];
         state.actualAccessEventBound = access.some(
           (event) =>

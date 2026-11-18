@@ -568,7 +568,7 @@ function seedDefaults() {
   mockSecretsApi.listMyUserSecrets.mockResolvedValue([]);
   mockSecretsApi.listProposals.mockResolvedValue([]);
   mockSecretsApi.usage.mockResolvedValue({ secretId: "secret-openai", bindings: [] });
-  mockSecretsApi.accessEvents.mockResolvedValue([]);
+  mockSecretsApi.accessEvents.mockResolvedValue({ items: [], nextCursor: null });
   mockAgentsApi.list.mockResolvedValue([]);
 }
 
@@ -789,10 +789,13 @@ describe("Secrets page layout", () => {
   it("caps activity at five entries until asked for the rest", async () => {
     mockSecretsApi.list.mockResolvedValue([makeCompanySecret()]);
     mockAgentsApi.list.mockResolvedValue([makeAgent({ id: "agent-coder", name: "CodexCoder" })]);
-    mockSecretsApi.accessEvents.mockResolvedValue([
-      makeAccessEvent(0, { outcome: "not_allowed" }),
-      ...[1, 2, 3, 4, 5, 6].map((index) => makeAccessEvent(index)),
-    ]);
+    mockSecretsApi.accessEvents.mockResolvedValue({
+      items: [
+        makeAccessEvent(0, { outcome: "not_allowed" }),
+        ...[1, 2, 3, 4, 5, 6].map((index) => makeAccessEvent(index)),
+      ],
+      nextCursor: null,
+    });
     await renderSecrets(container, { path: "/company/settings/secrets?secret=secret-openai" });
     await waitForReact(() => findControl("Show all activity", detailsPanel()) != null);
 
@@ -807,6 +810,35 @@ describe("Secrets page layout", () => {
 
     expect(activity.querySelectorAll("li")).toHaveLength(7);
     expect(findControl("Show all activity", activity)).toBeUndefined();
+    // One page, so there is nothing further to pull.
+    expect(findControl("Load more", activity)).toBeUndefined();
+  });
+
+  it("pulls the next access-event page through the cursor when asked for more", async () => {
+    mockSecretsApi.list.mockResolvedValue([makeCompanySecret()]);
+    mockAgentsApi.list.mockResolvedValue([makeAgent({ id: "agent-coder", name: "CodexCoder" })]);
+    mockSecretsApi.accessEvents.mockImplementation(async (_id: string, params: { cursor?: string } = {}) =>
+      (params.cursor === "cursor-page-2"
+        ? { items: [7, 8, 9].map((index) => makeAccessEvent(index)), nextCursor: null }
+        : { items: [0, 1, 2, 3, 4, 5, 6].map((index) => makeAccessEvent(index)), nextCursor: "cursor-page-2" }));
+
+    await renderSecrets(container, { path: "/company/settings/secrets?secret=secret-openai" });
+    await waitForReact(() => findControl("Show all activity", detailsPanel()) != null);
+
+    const activity = detailsPanel()!.querySelector('[aria-label="Activity"]')!;
+    await click(findControl("Show all activity", activity));
+    expect(activity.querySelectorAll("li")).toHaveLength(7);
+
+    // The first page reported more behind it, so the tab offers to fetch it.
+    await click(findControl("Load more", activity));
+    await waitForReact(() => activity.querySelectorAll("li").length === 10);
+
+    expect(mockSecretsApi.accessEvents).toHaveBeenCalledWith(
+      "secret-openai",
+      expect.objectContaining({ cursor: "cursor-page-2" }),
+    );
+    // Both pages are on screen and the walk is finished.
+    expect(findControl("Load more", activity)).toBeUndefined();
   });
 
   it("opens the secret detail sheet from a ?secret= deep link", async () => {

@@ -1,4 +1,5 @@
 import { Router, type Response } from "express";
+import { z } from "zod";
 import type { Db } from "@paperclipai/db";
 import {
   createSecretProviderConfigSchema,
@@ -14,13 +15,15 @@ import {
   updateSecretSchema,
   updateUserSecretDefinitionSchema,
   updateUserSecretValueSchema,
+  SECRET_ACCESS_EVENT_DEFAULT_LIMIT,
+  SECRET_ACCESS_EVENT_MAX_LIMIT,
 } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
 import { assertBoard, assertBoardOrAgent, assertCompanyAccess, getAccessibleResource } from "./authz.js";
 import { logActivity, secretService } from "../services/index.js";
 import { createSecretProposalsService } from "../services/secret-proposals.js";
 import { getConfiguredSecretProvider } from "../secrets/configured-provider.js";
-import { forbidden, notFound, unauthorized, unprocessable } from "../errors.js";
+import { badRequest, forbidden, notFound, unauthorized, unprocessable } from "../errors.js";
 import { authorizationDeniedDetails } from "../services/authorization.js";
 import { accessService } from "../services/access.js";
 import { heartbeatService } from "../services/heartbeat.js";
@@ -105,6 +108,15 @@ function userSecretDefinitionActivityActor(req: Parameters<typeof assertBoard>[0
 function isCompanyScopedSecret(secret: { scope?: string | null }) {
   return (secret.scope ?? "company") === "company";
 }
+
+// Same pagination contract as the agent-action audit feed in routes/activity.ts:
+// a bounded `limit` and an opaque keyset `cursor`, both out-of-range values
+// rejected with 400 rather than clamped.
+const secretAccessEventsQuerySchema = z.object({
+  cursor: z.string().min(1).optional(),
+  limit: z.coerce.number().int().min(1).max(SECRET_ACCESS_EVENT_MAX_LIMIT)
+    .default(SECRET_ACCESS_EVENT_DEFAULT_LIMIT),
+});
 
 export function secretRoutes(db: Db, deps: SecretRoutesDeps = {}) {
   const router = Router();
@@ -1110,7 +1122,13 @@ export function secretRoutes(db: Db, deps: SecretRoutesDeps = {}) {
       "Secret not found",
     );
     if (!existing) return;
-    const events = await svc.listAccessEvents(existing.companyId, existing.id);
+    // Validated after the existence check so an out-of-range page size cannot
+    // tell an outsider a secret exists.
+    const parsedQuery = secretAccessEventsQuerySchema.safeParse(req.query);
+    if (!parsedQuery.success) {
+      throw badRequest("Invalid secret access event query", parsedQuery.error.issues);
+    }
+    const events = await svc.listAccessEvents(existing.companyId, existing.id, parsedQuery.data);
     res.json(events);
   });
 

@@ -55,6 +55,11 @@ interface SecretDeleteOptions extends BaseClientOptions {
   confirm?: string;
 }
 
+interface SecretAccessEventsOptions extends BaseClientOptions {
+  limit?: string;
+  cursor?: string;
+}
+
 interface SecretLinkOptions extends BaseClientOptions {
   companyId?: string;
   name?: string;
@@ -519,12 +524,22 @@ export function registerSecretCommands(program: Command): void {
   addCommonClientOptions(
     secrets
       .command("access-events")
-      .description("List secret access events")
+      .description("List secret access events, newest first")
       .argument("<secretId>", "Secret ID")
-      .action(async (secretId: string, opts: BaseClientOptions) => {
+      .option("--limit <n>", "Events per page (1-200, default 50)")
+      .option("--cursor <cursor>", "Opaque nextCursor from a previous page")
+      .action(async (secretId: string, opts: SecretAccessEventsOptions) => {
         try {
           const ctx = resolveCommandContext(opts);
-          printOutput(await ctx.api.get(apiPath`/api/secrets/${secretId}/access-events`), { json: ctx.json });
+          const params = new URLSearchParams();
+          if (opts.limit) params.set("limit", opts.limit);
+          if (opts.cursor) params.set("cursor", opts.cursor);
+          const qs = params.toString();
+          // One page plus its nextCursor; pass that back via --cursor for the next page.
+          printOutput(
+            await ctx.api.get(`${apiPath`/api/secrets/${secretId}/access-events`}${qs ? `?${qs}` : ""}`),
+            { json: ctx.json },
+          );
         } catch (err) {
           handleCommandError(err);
         }

@@ -3,7 +3,7 @@ import {randomBytes} from "node:crypto";
 import {expect} from "@playwright/test";
 import type {RequestConfirmationInteraction} from "../../../packages/shared/src/types/issue.js";
 import type {ChatCatalogContext} from "../chat-catalog-contract.js";
-import type {CompanySecret,CompanySecretUsageBinding,SecretProposalView,SecretAccessEvent} from "../../../packages/shared/src/types/secrets.js";
+import type {CompanySecret,CompanySecretUsageBinding,SecretProposalView,SecretAccessEventPage} from "../../../packages/shared/src/types/secrets.js";
 import {pollUntil} from "../api.js";
 import {sendChatMessage} from "../chat-flow.js";
 import {collectRunEvents} from "../run-observations.js";
@@ -131,7 +131,7 @@ export const secretProposalExternalCases=[definition("secrets.secret-proposal",a
  async observe(ctx,state){
   const o=await observeExternal(ctx,state);state.proposalsAfter=await proposals(ctx);state.bindingsAfter=await bindings(ctx,String(state.secretId));state.secretAfter=(await ctx.input.api.get<CompanySecret[]>(`${root(ctx)}/secrets`)).find(secret=>secret.id===state.secretId);
   const worker=await ctx.input.api.get<AgentConfig>(`/api/agents/${state.morganId}`),ref=(worker.adapterConfig.env as Record<string,unknown>|undefined)?.PUBLISHING_API_KEY as {type?:string;secretId?:string;version?:string}|undefined;state.configReferenceMatched=ref?.type==="secret_ref"&&ref.secretId===state.secretId&&(ref.version??"latest")==="latest";
-  state.morganNativeRunCount=o.runs.filter(run=>run.agentId===state.morganId).length;const access=await ctx.input.api.get<SecretAccessEvent[]>(`/api/secrets/${state.secretId}/access-events`);state.morganTaskDeliveryCount=access.filter(event=>event.consumerId===state.morganId&&!!event.heartbeatRunId).length;
+  state.morganNativeRunCount=o.runs.filter(run=>run.agentId===state.morganId).length;const access=(await ctx.input.api.get<SecretAccessEventPage>(`/api/secrets/${state.secretId}/access-events`)).items;state.morganTaskDeliveryCount=access.filter(event=>event.consumerId===state.morganId&&!!event.heartbeatRunId).length;
   const value=privateValues.get(ctx)!;const scan=await scanReachableSecretOutputs(ctx,[ctx.issue()!.id],value),events=[];for(const run of o.runs)events.push(...await collectRunEvents((afterSeq,limit)=>privateScanJson(ctx,`/api/heartbeat-runs/${run.id}/events?afterSeq=${afterSeq}&limit=${limit}`)));state.secretScanComplete=scan.complete;state.secretLeaked=scan.leaked||bytesContainSecret(Buffer.from(JSON.stringify([events,o.runs,state.proposalsAfter,worker])),value);return {...o,state};
  },
  async verifyResult(ctx,_state,value){await verifyRenderedReply(ctx,value);const source=ctx.input.page.url();try{await ctx.input.page.goto(`/${ctx.input.fixtures.company.issuePrefix}/agents/${(value as {state:Record<string,unknown>}).state.morganId}/configuration`,{waitUntil:"domcontentloaded"});await expect(ctx.input.page.locator('[data-config-section="environment-variables"]')).toBeVisible();expect(await ctx.input.page.getByRole("textbox",{name:"Variable name",exact:true}).evaluateAll(inputs=>inputs.map(input=>(input as HTMLInputElement).value))).toContain("PUBLISHING_API_KEY");await expect(ctx.input.page.getByText("Deployment publishing key",{exact:true}).first()).toBeVisible();}finally{await ctx.input.page.goto(source,{waitUntil:"domcontentloaded"});}},

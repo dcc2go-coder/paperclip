@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertCircle,
   AlertTriangle,
@@ -1173,13 +1173,22 @@ export function Secrets() {
     queryFn: () => secretsApi.usage(selectedSecret!.id),
     enabled: Boolean(selectedSecret),
   });
-  const eventsQuery = useQuery({
+  // The access history is unbounded on a busy secret, so it arrives one keyset
+  // page at a time and the tab offers "Load more" for the rest.
+  const eventsQuery = useInfiniteQuery({
     queryKey: selectedSecret
       ? queryKeys.secrets.accessEvents(selectedSecret.id)
       : ["secrets", "access-events", "__disabled__"],
-    queryFn: () => secretsApi.accessEvents(selectedSecret!.id),
+    queryFn: ({ pageParam }) =>
+      secretsApi.accessEvents(selectedSecret!.id, { limit: ACCESS_EVENTS_PAGE_SIZE, cursor: pageParam }),
     enabled: Boolean(selectedSecret),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (lastPage) => lastPage.nextCursor ?? undefined,
   });
+  const accessEvents = useMemo(
+    () => (eventsQuery.data?.pages ?? []).flatMap((page) => page.items),
+    [eventsQuery.data],
+  );
 
   // Agents are listed with their environment variable above; this is everything else.
   const otherSecretUses = useMemo(
@@ -2662,9 +2671,12 @@ export function Secrets() {
                 <DetailSection title="Activity">
                   <SecretEventsTab
                     loading={eventsQuery.isPending}
-                    events={eventsQuery.data ?? []}
+                    events={accessEvents}
                     companyId={selectedCompanyId}
                     agents={agentsQuery.data}
+                    hasMore={eventsQuery.hasNextPage}
+                    loadingMore={eventsQuery.isFetchingNextPage}
+                    onLoadMore={() => void eventsQuery.fetchNextPage()}
                   />
                 </DetailSection>
               </div>
@@ -4892,6 +4904,8 @@ const ACCESS_OUTCOME_TEXT: Record<SecretAccessEvent["outcome"], string> = {
 };
 
 const ACTIVITY_PREVIEW_COUNT = 5;
+/** Rows per access-history request. Matches the endpoint's own default page size. */
+const ACCESS_EVENTS_PAGE_SIZE = 50;
 
 /** Recent reads of the secret, newest first. Values are never part of an entry. */
 export function SecretEventsTab({
@@ -4899,11 +4913,19 @@ export function SecretEventsTab({
   events,
   companyId,
   agents,
+  hasMore = false,
+  loadingMore = false,
+  onLoadMore,
 }: {
   loading: boolean;
+  /** The pages fetched so far, flattened. The endpoint is keyset paginated. */
   events: SecretAccessEvent[];
   companyId: string;
   agents?: readonly Agent[];
+  /** True while the server still has older events behind a cursor. */
+  hasMore?: boolean;
+  loadingMore?: boolean;
+  onLoadMore?: () => void;
 }) {
   const [showAll, setShowAll] = useState(false);
   // Resolve responsible/owner user ids to human names for user-scoped events.
@@ -4956,13 +4978,24 @@ export function SecretEventsTab({
           </li>
         ))}
       </ul>
-      {!showAll && events.length > ACTIVITY_PREVIEW_COUNT ? (
+      {!showAll && (events.length > ACTIVITY_PREVIEW_COUNT || hasMore) ? (
         <button
           type="button"
           className="self-start text-sm text-muted-foreground underline underline-offset-4 hover:text-foreground"
           onClick={() => setShowAll(true)}
         >
           Show all activity
+        </button>
+      ) : null}
+      {/* Everything fetched is on screen, but the server still has older events. */}
+      {showAll && hasMore ? (
+        <button
+          type="button"
+          className="self-start text-sm text-muted-foreground underline underline-offset-4 hover:text-foreground disabled:opacity-60"
+          disabled={loadingMore}
+          onClick={() => onLoadMore?.()}
+        >
+          {loadingMore ? "Loading…" : "Load more"}
         </button>
       ) : null}
     </div>

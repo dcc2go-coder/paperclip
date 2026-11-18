@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { and, desc, eq, inArray, isNull, like, ne, notInArray, notLike, or, sql } from "drizzle-orm";
+import { and, desc, eq, getTableColumns, inArray, isNull, like, lt, ne, notInArray, notLike, or, sql } from "drizzle-orm";
+import { z } from "zod";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
@@ -43,11 +44,12 @@ import {
   envBindingSchema,
   isUuidLike,
   normalizeAgentUrlKey,
+  SECRET_ACCESS_EVENT_DEFAULT_LIMIT,
   secretProviderConfigPayloadSchema,
   secretProviderConfigDiscoveryPreviewSchema,
   updateSecretProviderConfigSchema,
 } from "@paperclipai/shared";
-import { conflict, forbidden, HttpError, notFound, unprocessable } from "../errors.js";
+import { badRequest, conflict, forbidden, HttpError, notFound, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import {
   checkSecretProviders,
@@ -123,6 +125,30 @@ const COMPANY_SECRET_VERSION_UNIQUE_CONSTRAINT = "company_secret_versions_secret
 // The one stale-rotation conflict text. The rotate function returns it for every
 // stale race, so the caller sees one fixed 409 and no owner-value state.
 const SECRET_VERSION_STALE_CONFLICT = "The secret version is stale. Reload and confirm the rotation again.";
+
+type SecretAccessEventCursor = { createdAt: string; id: string };
+
+const secretAccessEventCursorSchema = z.object({
+  createdAt: z.string().datetime({ offset: true }),
+  id: z.string().guid(),
+});
+
+/** Returns null for anything that is not a cursor this service issued. */
+function decodeSecretAccessEventCursor(cursor: string | undefined): SecretAccessEventCursor | null {
+  if (!cursor) return null;
+  try {
+    const parsed = secretAccessEventCursorSchema.safeParse(
+      JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")),
+    );
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
+}
+
+function encodeSecretAccessEventCursor(value: SecretAccessEventCursor) {
+  return Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
+}
 
 // The fixed Claude Code OAuth user-secret definition. The Claude login flow owns
 // only this compile-time key and these fixed properties. A caller never selects
@@ -3949,12 +3975,55 @@ export function secretService(db: Db | DbTransaction) {
       }));
     },
 
-    listAccessEvents: (companyId: string, secretId: string) =>
-      db
-        .select()
+    /**
+     * One newest-first page of a secret's access history. Keyset paginated on
+     * `(createdAt, id)`: offset pagination would drift on this table, which is
+     * append-only and written on every secret read.
+     */
+    listAccessEvents: async (
+      companyId: string,
+      secretId: string,
+      options: { limit?: number; cursor?: string } = {},
+    ) => {
+      const limit = options.limit ?? SECRET_ACCESS_EVENT_DEFAULT_LIMIT;
+      const cursor = decodeSecretAccessEventCursor(options.cursor);
+      if (options.cursor && !cursor) throw badRequest("Invalid secret access cursor");
+      const conditions = [
+        eq(secretAccessEvents.companyId, companyId),
+        eq(secretAccessEvents.secretId, secretId),
+      ];
+      if (cursor) {
+        conditions.push(or(
+          sql<boolean>`${secretAccessEvents.createdAt} < ${cursor.createdAt}::timestamptz`,
+          and(
+            sql<boolean>`${secretAccessEvents.createdAt} = ${cursor.createdAt}::timestamptz`,
+            lt(secretAccessEvents.id, cursor.id),
+          ),
+        )!);
+      }
+      // `createdAt` is microsecond-precision in Postgres but millisecond-precision
+      // once driven through a JS Date, so the cursor carries the rendered value
+      // rather than the row's Date to keep the keyset exact.
+      const rows = await db
+        .select({
+          ...getTableColumns(secretAccessEvents),
+          cursorCreatedAt: sql<string>`to_char(${secretAccessEvents.createdAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`.as("cursor_created_at"),
+        })
         .from(secretAccessEvents)
-        .where(and(eq(secretAccessEvents.companyId, companyId), eq(secretAccessEvents.secretId, secretId)))
-        .orderBy(desc(secretAccessEvents.createdAt)),
+        .where(and(...conditions))
+        .orderBy(desc(secretAccessEvents.createdAt), desc(secretAccessEvents.id))
+        .limit(limit + 1);
+
+      const page = rows.slice(0, limit);
+      const last = page.at(-1);
+      return {
+        // The per-row fields are unchanged; only the pagination key is dropped.
+        items: page.map(({ cursorCreatedAt: _cursorCreatedAt, ...event }) => event),
+        nextCursor: rows.length > limit && last
+          ? encodeSecretAccessEventCursor({ createdAt: last.cursorCreatedAt, id: last.id })
+          : null,
+      };
+    },
 
     listUserSecretDefinitions: (companyId: string) =>
       db

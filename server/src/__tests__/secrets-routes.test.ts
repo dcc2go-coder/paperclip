@@ -1060,6 +1060,159 @@ describe("secret routes", () => {
     expect(mockSecretService.listAccessEvents).not.toHaveBeenCalled();
   });
 
+  describe("GET /secrets/:id/access-events pagination", () => {
+    const PAGINATED_SECRET_ID = "99999999-9999-4999-8999-999999999999";
+    // More rows than the default page size, so "no parameters" is observably bounded.
+    const TOTAL_EVENTS = 120;
+
+    /** Newest first: index 0 is the most recent event. */
+    const allEvents = Array.from({ length: TOTAL_EVENTS }, (_, index) => ({
+      id: `event-${String(index).padStart(4, "0")}`,
+      companyId: "company-1",
+      secretId: PAGINATED_SECRET_ID,
+      consumerType: "agent",
+      consumerId: "agent-1",
+      outcome: "success",
+      createdAt: new Date(Date.UTC(2026, 0, 2) - index * 60_000).toISOString(),
+    }));
+
+    const encodeCursor = (event: (typeof allEvents)[number]) =>
+      Buffer.from(JSON.stringify({ createdAt: event.createdAt, id: event.id }), "utf8")
+        .toString("base64url");
+
+    /**
+     * Stands in for the real service: the same keyset contract (seek past the
+     * cursor row, fetch `limit`, report whether more remain) over a fixed list,
+     * so the route's own parameter handling is what these tests exercise.
+     */
+    function pageOf({ limit, cursor }: { limit?: number; cursor?: string }) {
+      const start = cursor
+        ? allEvents.findIndex(
+          (event) => event.id === JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")).id,
+        ) + 1
+        : 0;
+      const items = allEvents.slice(start, start + (limit ?? 0));
+      const last = items.at(-1);
+      return {
+        items,
+        nextCursor: last && start + items.length < allEvents.length ? encodeCursor(last) : null,
+      };
+    }
+
+    beforeEach(() => {
+      mockSecretService.getById.mockResolvedValue({
+        id: PAGINATED_SECRET_ID,
+        companyId: "company-1",
+        name: "Busy secret",
+        key: "busy_secret",
+        provider: "local_encrypted",
+        managedMode: "paperclip_managed",
+      });
+      mockSecretService.listAccessEvents.mockImplementation(
+        async (_companyId: string, _secretId: string, options: { limit?: number; cursor?: string }) =>
+          pageOf(options),
+      );
+    });
+
+    it("returns at most the requested page size", async () => {
+      const res = await request(createApp())
+        .get(`/api/secrets/${PAGINATED_SECRET_ID}/access-events`)
+        .query({ limit: 10 });
+
+      expect(res.status).toBe(200);
+      expect(res.body.items).toHaveLength(10);
+      expect(mockSecretService.listAccessEvents).toHaveBeenCalledWith(
+        "company-1",
+        PAGINATED_SECRET_ID,
+        { limit: 10 },
+      );
+    });
+
+    it("bounds an unparameterized request to the default page size and returns no total count", async () => {
+      const res = await request(createApp()).get(
+        `/api/secrets/${PAGINATED_SECRET_ID}/access-events`,
+      );
+
+      expect(res.status).toBe(200);
+      // The secret has 120 events; a caller that asks for nothing gets 50.
+      expect(res.body.items).toHaveLength(50);
+      expect(mockSecretService.listAccessEvents).toHaveBeenCalledWith(
+        "company-1",
+        PAGINATED_SECRET_ID,
+        { limit: 50 },
+      );
+      // The envelope carries the page and its cursor only: no total, no count.
+      expect(Object.keys(res.body).sort()).toEqual(["items", "nextCursor"]);
+    });
+
+    it("rejects a page size above the server maximum with 400 rather than clamping", async () => {
+      const res = await request(createApp())
+        .get(`/api/secrets/${PAGINATED_SECRET_ID}/access-events`)
+        .query({ limit: 100_000 });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe("Invalid secret access event query");
+      // Rejected outright: no oversized read reaches the database.
+      expect(mockSecretService.listAccessEvents).not.toHaveBeenCalled();
+    });
+
+    it("rejects a page size below the minimum with 400", async () => {
+      const res = await request(createApp())
+        .get(`/api/secrets/${PAGINATED_SECRET_ID}/access-events`)
+        .query({ limit: 0 });
+
+      expect(res.status).toBe(400);
+      expect(mockSecretService.listAccessEvents).not.toHaveBeenCalled();
+    });
+
+    it("orders the default page newest first", async () => {
+      const res = await request(createApp()).get(
+        `/api/secrets/${PAGINATED_SECRET_ID}/access-events`,
+      );
+
+      expect(res.status).toBe(200);
+      const timestamps = res.body.items.map((event: { createdAt: string }) =>
+        Date.parse(event.createdAt));
+      expect(timestamps[0]).toBeGreaterThanOrEqual(timestamps.at(-1));
+      expect([...timestamps].sort((a: number, b: number) => b - a)).toEqual(timestamps);
+    });
+
+    it("walks from page one to page two through nextCursor with no overlap and no gap", async () => {
+      const app = createApp();
+      const first = await request(app)
+        .get(`/api/secrets/${PAGINATED_SECRET_ID}/access-events`)
+        .query({ limit: 25 });
+
+      expect(first.status).toBe(200);
+      expect(first.body.nextCursor).toEqual(expect.any(String));
+
+      const second = await request(app)
+        .get(`/api/secrets/${PAGINATED_SECRET_ID}/access-events`)
+        .query({ limit: 25, cursor: first.body.nextCursor });
+
+      expect(second.status).toBe(200);
+      const firstIds = first.body.items.map((event: { id: string }) => event.id);
+      const secondIds = second.body.items.map((event: { id: string }) => event.id);
+      expect(secondIds).toHaveLength(25);
+      // No overlap: the two pages share nothing.
+      expect(firstIds.filter((id: string) => secondIds.includes(id))).toEqual([]);
+      // No gap: together they are exactly the first 50 events in order.
+      expect([...firstIds, ...secondIds]).toEqual(
+        allEvents.slice(0, 50).map((event) => event.id),
+      );
+    });
+
+    it("reports the last page with a null nextCursor", async () => {
+      const res = await request(createApp())
+        .get(`/api/secrets/${PAGINATED_SECRET_ID}/access-events`)
+        .query({ limit: 200 });
+
+      expect(res.status).toBe(200);
+      expect(res.body.items).toHaveLength(TOTAL_EVENTS);
+      expect(res.body.nextCursor).toBeNull();
+    });
+  });
+
   it("returns usage bindings for in-tenant GET /secrets/:id/usage", async () => {
     mockSecretService.getById.mockResolvedValue({
       id: "88888888-8888-4888-8888-888888888888",
